@@ -1,34 +1,43 @@
 <script>
   import { onDestroy, onMount, tick } from 'svelte';
   import { buildStreamCandidates as buildPlaybackCandidates, isSupportedPlaylistUrl } from './lib/player';
+  import backupStations from './lib/phStationsBackup.json';
 
   const DEV_WP_API_BASE = '/wp-api';
   const REMOTE_WP_API_BASE = 'https://radio.fourwebminds.com/wp-json';
-  const WP_API_URLS = [
-    `${DEV_WP_API_BASE}/wp/v2/station?per_page=100`,
-    `${REMOTE_WP_API_BASE}/wp/v2/station?per_page=100`
+  const EXTRA_WP_API_BASES = String(import.meta.env.VITE_BACKUP_WP_API_BASES || '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const WP_API_BASES = [...new Set([DEV_WP_API_BASE, REMOTE_WP_API_BASE, ...EXTRA_WP_API_BASES])];
+  const WP_API_URLS = WP_API_BASES.map((base) => `${base.replace(/\/+$/, '')}/wp/v2/station?per_page=100`);
+
+  const EXTRA_RADIO_BROWSER_HOSTS = String(import.meta.env.VITE_BACKUP_RADIO_BROWSER_HOSTS || '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const RADIO_BROWSER_HOSTS = [...new Set(['all', 'de1', 'nl1', 'fr1', 'us1', 'at1', 'fi1', ...EXTRA_RADIO_BROWSER_HOSTS])];
+  const RADIO_BROWSER_PATHS = [
+    '/json/stations/bycountrycodeexact/PH?hidebroken=true&order=clickcount&reverse=true&limit=1200',
+    '/json/stations/search?countrycode=PH&hidebroken=true&order=clickcount&reverse=true&limit=1200',
+    '/json/stations/search?countrycodeexact=PH&hidebroken=true&order=clickcount&reverse=true&limit=1200',
+    '/json/stations/search?country=Philippines&hidebroken=true&order=clickcount&reverse=true&limit=1200'
   ];
-  const RADIO_BROWSER_ENDPOINTS = [
-    'https://all.api.radio-browser.info/json/stations/bycountrycodeexact/PH?hidebroken=true&order=clickcount&reverse=true&limit=1200',
-    'https://all.api.radio-browser.info/json/stations/search?countrycode=PH&hidebroken=true&order=clickcount&reverse=true&limit=1200',
-    'https://all.api.radio-browser.info/json/stations/search?countrycodeexact=PH&hidebroken=true&order=clickcount&reverse=true&limit=1200',
-    'https://all.api.radio-browser.info/json/stations/search?country=Philippines&hidebroken=true&order=clickcount&reverse=true&limit=1200',
-    'https://de1.api.radio-browser.info/json/stations/bycountrycodeexact/PH?hidebroken=true&order=clickcount&reverse=true&limit=1200',
-    'https://de1.api.radio-browser.info/json/stations/search?countrycode=PH&hidebroken=true&order=clickcount&reverse=true&limit=1200',
-    'https://de1.api.radio-browser.info/json/stations/search?countrycodeexact=PH&hidebroken=true&order=clickcount&reverse=true&limit=1200',
-    'https://de1.api.radio-browser.info/json/stations/search?country=Philippines&hidebroken=true&order=clickcount&reverse=true&limit=1200',
-    'https://nl1.api.radio-browser.info/json/stations/bycountrycodeexact/PH?hidebroken=true&order=clickcount&reverse=true&limit=1200',
-    'https://nl1.api.radio-browser.info/json/stations/search?countrycode=PH&hidebroken=true&order=clickcount&reverse=true&limit=1200',
-    'https://nl1.api.radio-browser.info/json/stations/search?countrycodeexact=PH&hidebroken=true&order=clickcount&reverse=true&limit=1200',
-    'https://nl1.api.radio-browser.info/json/stations/search?country=Philippines&hidebroken=true&order=clickcount&reverse=true&limit=1200',
-    'https://fr1.api.radio-browser.info/json/stations/bycountrycodeexact/PH?hidebroken=true&order=clickcount&reverse=true&limit=1200',
-    'https://fr1.api.radio-browser.info/json/stations/search?countrycode=PH&hidebroken=true&order=clickcount&reverse=true&limit=1200',
-    'https://fr1.api.radio-browser.info/json/stations/search?countrycodeexact=PH&hidebroken=true&order=clickcount&reverse=true&limit=1200',
-    'https://fr1.api.radio-browser.info/json/stations/search?country=Philippines&hidebroken=true&order=clickcount&reverse=true&limit=1200'
-  ];
+  const RADIO_BROWSER_ENDPOINTS = RADIO_BROWSER_HOSTS.flatMap((host) =>
+    RADIO_BROWSER_PATHS.map((path) => `https://${host}.api.radio-browser.info${path}`)
+  );
+  const RADIO_BROWSER_PROXY_BASES = String(
+    import.meta.env.VITE_BACKUP_RADIO_BROWSER_PROXY_BASES || '/rb-api,/api/radio-browser'
+  )
+    .split(',')
+    .map((value) => value.trim().replace(/\/+$/, ''))
+    .filter(Boolean);
+  const RADIO_BROWSER_PROXY_ENDPOINTS = RADIO_BROWSER_PROXY_BASES.flatMap((base) =>
+    RADIO_BROWSER_PATHS.map((path) => `${base}${path}`)
+  );
   // Revert to WordPress-first by swapping this order.
-  const STATION_SOURCE_PRIORITY = ['radio-browser', 'wordpress'];
-  const FETCH_TIMEOUT_MS = 8000;
+  const STATION_SOURCE_PRIORITY = ['radio-browser', 'radio-browser-proxy', 'local-backup', 'wordpress'];
+  const FETCH_TIMEOUT_MS = 10000;
   const MAX_STATIONS = 623;
   const FALLBACK_STATIONS = [
     {
@@ -96,6 +105,7 @@
   let stations = [...FALLBACK_STATIONS];
   let selectedBand = 'all';
   let selectedLocation = 'all';
+  let searchQuery = '';
   let isLoading = false;
   let loadError = '';
   let loadNotice = '';
@@ -119,6 +129,7 @@
   let stationsNeedingFix = [];
   let menuItems = [];
   let visibleStations = [];
+  let searchedStations = [];
   let activeStation = null;
   let featuredStations = [];
   let hasCachedSnapshot = false;
@@ -327,7 +338,6 @@
       if (!station?.name || !station?.streamUrl) continue;
       if (!/^https?:\/\//i.test(station.streamUrl)) continue;
       if (isBlockedUrl(station.streamUrl)) continue;
-      if (PLAYLIST_FILE_REGEX.test(station.streamUrl) && !isSupportedPlaylistUrl(station.streamUrl)) continue;
       const fallbackKey = `${station.name.toLowerCase()}|${station.streamUrl.toLowerCase()}`;
       if (station.id && seenIds.has(station.id)) continue;
       if (seenKeys.has(fallbackKey)) continue;
@@ -408,6 +418,43 @@
     throw new Error(firstError);
   }
 
+  async function fetchRadioBrowserProxyStations() {
+    const attempts = await Promise.all(
+      RADIO_BROWSER_PROXY_ENDPOINTS.map(async (endpoint) => {
+        try {
+          const json = await fetchJsonWithTimeout(endpoint);
+          if (!Array.isArray(json)) {
+            return { endpoint, stations: [], error: `Unexpected Radio Browser proxy response format at ${endpoint}` };
+          }
+          const cleaned = dedupeAndCleanNormalizedStations(json.map((item) => normalizeRadioBrowserStation(item)));
+          return { endpoint, stations: cleaned, error: '' };
+        } catch (error) {
+          return { endpoint, stations: [], error: error?.message || String(error) };
+        }
+      })
+    );
+
+    const best = attempts.reduce(
+      (acc, current) => (current.stations.length > acc.stations.length ? current : acc),
+      { endpoint: '', stations: [], error: '' }
+    );
+
+    if (best.stations.length > 0) {
+      return { stations: best.stations, source: best.endpoint };
+    }
+
+    const firstError = attempts.find((item) => item.error)?.error || 'Radio Browser proxy returned no usable stations.';
+    throw new Error(firstError);
+  }
+
+  async function fetchLocalBackupStations() {
+    const cleaned = dedupeAndCleanNormalizedStations(Array.isArray(backupStations) ? backupStations : []);
+    if (cleaned.length > 0) {
+      return { stations: cleaned, source: 'local-backup-json' };
+    }
+    throw new Error('Local backup station dataset is empty.');
+  }
+
   async function loadStations() {
     isLoading = true;
     loadError = '';
@@ -423,8 +470,22 @@
     try {
       for (const source of STATION_SOURCE_PRIORITY) {
         try {
-          const result = source === 'radio-browser' ? await fetchRadioBrowserStations() : await fetchWordPressStations();
-          const sourceLabel = source === 'radio-browser' ? 'Radio Browser' : 'WordPress';
+          const result =
+            source === 'radio-browser'
+              ? await fetchRadioBrowserStations()
+              : source === 'radio-browser-proxy'
+                ? await fetchRadioBrowserProxyStations()
+                : source === 'local-backup'
+                  ? await fetchLocalBackupStations()
+                : await fetchWordPressStations();
+          const sourceLabel =
+            source === 'radio-browser'
+              ? 'Radio Browser'
+              : source === 'radio-browser-proxy'
+                ? 'Radio Browser Proxy'
+                : source === 'local-backup'
+                  ? 'Local Backup'
+                : 'WordPress';
           sourceResults.push({ ...result, sourceLabel });
         } catch (error) {
           const msg = sanitizeText(error?.message).slice(0, 140) || 'unknown error';
@@ -485,7 +546,7 @@
       issue: getPlaybackError(station?.streamUrl)
     }))
     .filter((item) => !!item.issue);
-  $: playableStations = sourceStations.filter((station) => !getPlaybackError(station?.streamUrl));
+  $: playableStations = sourceStations;
   $: featuredStations = [...playableStations]
     .sort((a, b) => {
       if ((b.votes || 0) !== (a.votes || 0)) return (b.votes || 0) - (a.votes || 0);
@@ -502,12 +563,26 @@
     selectedLocation === 'all'
       ? bandFilteredStations
       : bandFilteredStations.filter((station) => getLocationCategory(station) === selectedLocation);
+  $: searchedStations = visibleStations.filter((station) => {
+    const query = sanitizeText(searchQuery).toLowerCase();
+    if (!query) return true;
+    const haystack = [
+      station?.name,
+      station?.frequency,
+      station?.city,
+      station?.country,
+      station?.genre
+    ]
+      .map((value) => sanitizeText(value).toLowerCase())
+      .join(' ');
+    return haystack.includes(query);
+  });
   $: {
     const activeStationId = pendingStationId || playingStationId || nowPlaying?.id || '';
-    if (activeStationId && visibleStations.some((station) => station.id === activeStationId)) {
-      visibleStations = [
-        ...visibleStations.filter((station) => station.id === activeStationId),
-        ...visibleStations.filter((station) => station.id !== activeStationId)
+    if (activeStationId && searchedStations.some((station) => station.id === activeStationId)) {
+      searchedStations = [
+        ...searchedStations.filter((station) => station.id === activeStationId),
+        ...searchedStations.filter((station) => station.id !== activeStationId)
       ];
     }
   }
@@ -522,9 +597,6 @@
     }
     if (isBlockedUrl(value)) {
       return 'This stream host is blocked in the app.';
-    }
-    if (PLAYLIST_FILE_REGEX.test(value) && !isSupportedPlaylistUrl(value)) {
-      return 'Playlist URLs (.pls/.m3u) are not directly playable. Use a direct stream URL.';
     }
     return '';
   }
@@ -921,13 +993,22 @@
     </aside>
 
     <section class="card">
-      <h2>Stations ({visibleStations.length})</h2>
+      <h2>Stations ({searchedStations.length})</h2>
 
-      {#if visibleStations.length === 0}
-        <p class="muted">No playable stations in this category.</p>
+      <div class="search-wrap">
+        <input
+          type="search"
+          bind:value={searchQuery}
+          placeholder="Search station, city, genre..."
+          aria-label="Search stations"
+        />
+      </div>
+
+      {#if searchedStations.length === 0}
+        <p class="muted">No stations matched your filters.</p>
       {:else}
         <ul class="list">
-          {#each visibleStations as station}
+          {#each searchedStations as station}
             <li>
               <div class="top">
                 <strong>{station.name}</strong>
