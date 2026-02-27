@@ -14,6 +14,17 @@ export default defineConfig({
         changeOrigin: true,
         secure: true,
         rewrite: (path) => path.replace(/^\/wp-api/, '/wp-json')
+      },
+      '/rb-api': {
+        target: 'https://all.api.radio-browser.info',
+        changeOrigin: true,
+        secure: true
+      },
+      '/api/radio-browser': {
+        target: 'https://de1.api.radio-browser.info',
+        changeOrigin: true,
+        secure: true,
+        rewrite: (path) => path.replace(/^\/api\/radio-browser/, '')
       }
     }
   }

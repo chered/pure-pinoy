@@ -67,6 +67,10 @@ p {
   margin-bottom: 0.65rem;
 }
 
+.search-wrap {
+  margin-bottom: 0.75rem;
+}
+
 input {
   width: 100%;
   border: 1px solid #c7d1e2;
